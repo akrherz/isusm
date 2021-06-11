@@ -1,0 +1,295 @@
+'CR1000
+'Created by Short Cut (2.9), modified 9/16/12 by Jason Ritter
+'Edits include adding variables for imperial units, changing CS616's to CS655's
+'and adding data tables
+'01/23/13 by Kyle Campbell: add 4th soil moisture, rename variables, clean up prog (v2)
+'07/05/13 by Kyle Campbell: changed units of SlrkW from kW/m^2 to W/m^2 (v3)
+'07/29/13 by Kyle Campbell: added battV to hourly data table. Added a data table for soil
+'                           moisture diagnostics. Created new variables for calculated VWC
+'                           and P at all SM depths so the raw values are not overwritten.
+'                           Changed data table contents. Added code to manually calculate
+'                           permittivity when it is out of range, then flag the data to
+'                           indicate it is calculated using out of range data. (v4)
+'07/30/13 by Kyle Campbell  Added code to catch NANs in permittivity. (v5)
+'08/13/13 by Kyle Campbell  Put soil moisture measurements in a 15 minute slow sequence
+'                           scan along with all table calls since there's no data recorded
+'                           at intervals smaller than 15 minutes. This was to prevent
+'                           skipped system scans due to soil moisture measurements taking
+'                           too long in the 15 second main scan. Put some additional
+'                           constants in the include file and changed its name. (v6).
+'03/10/14 by Kyle Campbell  v7 is skipped, v7 was a debug version, not intended to run on
+'                           all stations in the network.
+'04/04/14 by Kyle Campbell  Added PreserveVariables because its helpful in a power outage.
+'                           Discovered that rain data was not getting logged. The reason
+'                           is because the data table that stores it is called in the
+'                           slow sequence scan, every 15 minutes. So any rain occuring
+'                           between that 15 minute interval (representing the vast amount
+'                           of scans) was getting missed. Solutions include splitting soil
+'                           and other data into 2 separate data tables or combining all
+'                           scans into one. All scans are combined back into one for trial.
+'                           (v8)
+'04/16/14 by Kyle Campbell  Added an hourly maximum wind gust with time stamp. Discussed
+'                           with Elwynn that all wind gusts are 15 second average gusts
+'                           due to the pulse count nature of the wind speed measurement.
+'                           Added a 15 minute data table that duplicates the hourly data
+'                           table at the request of Julie Berger who wants 15 minute
+'                           resolution on all parameters. (v9)
+'05/14/14 by Kyle Campbell  Changed multiplier to convert raw mV output of CS300
+'                           pyranometer to MJ/m^2 from 0.0045 to 0.000075. The old
+'                           multiplier was for totalizing over a 5 minute scan rather
+'                           than 15 seconds. (v10)
+'06/17/14 by Kyle Campbell  Added CS210 enclosure humidity probe as at least 3 stations
+'                           now have this probe attached. Added average to hourly table.
+'                           Removed ET calc from 15 minute table. That's intended to be
+'                           an hourly output and would be misrepresented in a 15 min
+'                           table. Made it into 15 min initially because 15 min was
+'                           copied from hourly. (v11)
+'07/28/14 by Kyle Campbell  Changed the content of the 15 minute data table to shorten
+'                           it while including imperial units as per Berger's request.
+'                           Changed soil moisture calculations to run more efficiently
+'                           and changed panel temp and enclosure humidity to measure
+'                           more quickly in order to reduce the time to execute a scan
+'                           and hopefully diminish the number of skipped system scans.
+'                           Added code to cap RH at 100 and removed imperial unit for
+'                           panel temp. Added NAN counters for applicable measurements
+'                           with total NAN count included in daily data table. Now
+'                           filtering NANs out of some processed data. Put soil moisture
+'                           measurement and post processing in subroutine to shorten
+'                           code and make main program more readable. (v12)
+'12/31/14 by Kyle Campbell  Added enclosure humidity to hourly data table. (v13)
+'08/08/16 by Dave Flory     Added 15-minute table with metric units to be consistent with
+'                           programs across the network.  Maintained the 15-minute table
+'                           with English units, although it isn't very clear why it is 
+'                           even here.  The name of the 15-minute table was changed to
+'                           keep things consistent throughout the network.
+'03/02/2017                 Added consistency in volumetric water content variables 
+'                           between daily and hourly output tables.  calcVWC and 
+'                           raw VWC variables are now included in each.
+'06/06/2019 by Dave Flory   Modifications to data tables.  Elimination of several diagnostic
+'                           tables and the addition of a one-minute table. New modems on 
+'                           stations will allow them to be constantly powered on, so
+'                           powering on and off the switched 12V port is also no longer necessary. 
+'                           Update includes cleaning up of code including removal of all 
+'                           reference to 6" soil probes which don't exist at these stations.  
+
+
+PreserveVariables
+
+'Constants for manual calculation of permittivity when sensor permittivity out of range
+Const C0 = -1.26445 : Const C1 = 13.0204   : Const C2 = -5.12193
+Const C3 = 21.1534  : Const C4 = 4.55704   : Const C5 = -45.0505
+Const C6 = 30.0966  : Const C7 = -29.8127  : Const C8 = -5.28148
+Const C9 = 34.7272  : Const C10 = -37.5712 : Const C11 = 9.02086
+Include "CPU:Constants.cr1"
+
+'Public variables and units
+Public BattV                     : Units BattV = Volts
+Public PTemp_C                   : Units PTemp_C = Deg C
+Public TRHData(2)
+Public SlrW                     : Units SlrW = W/m^2
+Public SlrMJ                     : Units SlrMJ = MJ/m^2
+Public SlrkJ                     : Units SlrkJ = kJ/m^2
+Public Rain_mm                   : Units Rain_mm = mm
+Public WS_mps                    : Units WS_mps = m/sec
+Public WindDir                   : Units WindDir = Deg
+Public TSoil_C                   : Units TSoil_C = Deg C
+Public DailyET                   : Units DailyET = mm
+Public EncRH                     : Units EncRH = %
+Alias TRHData(1) = TAir_C        : Units TAir_C = Deg C
+Alias TRHData(2) = RH            : Units RH = %
+
+'CS655 variables and units
+Public SoilM12In(6)
+Public SoilM24In(6)
+Public SoilM50In(6)
+Public calcSM12In(3)
+Public calcSM24In(3)
+Public calcSM50In(3)
+Alias SoilM12In(1) = VWC12       : Units VWC12 = m^3/m^3
+Alias SoilM12In(2) = EC12        : Units EC12 = dS/m
+Alias SoilM12In(3) = T12_C       : Units T12_C = Deg C
+Alias SoilM12In(4) = P12         : Units P12 = unitless
+Alias SoilM12In(5) = PA12        : Units PA12 = nSec
+Alias SoilM12In(6) = VR12        : Units VR12 = unitless
+Alias SoilM24In(1) = VWC24       : Units VWC24 = m^3/m^3
+Alias SoilM24In(2) = EC24        : Units EC24 = dS/m
+Alias SoilM24In(3) = T24_C       : Units T24_C = Deg C
+Alias SoilM24In(4) = P24         : Units P24 = unitless
+Alias SoilM24In(5) = PA24        : Units PA24 = nSec
+Alias SoilM24In(6) = VR24        : Units VR24 = unitless
+Alias SoilM50In(1) = VWC50       : Units VWC50 = m^3/m^3
+Alias SoilM50In(2) = EC50        : Units EC50 = dS/m
+Alias SoilM50In(3) = T50_C       : Units T50_C = Deg C
+Alias SoilM50In(4) = P50         : Units P50 = unitless
+Alias SoilM50In(5) = PA50        : Units PA50 = nSec
+Alias SoilM50In(6) = VR50        : Units VR50 = unitless
+Alias calcSM12In(1) = calcVWC12  : Units calcVWC12 = m^3/m^3
+Alias calcSM12In(2) = calcEC12   : Units calcEC12 = dS/m
+Alias calcSM12In(3) = calcP12    : Units calcP12 = unitless
+Alias calcSM24In(1) = calcVWC24  : Units calcVWC24 = m^3/m^3
+Alias calcSM24In(2) = calcEC24   : Units calcEC24 = dS/m
+Alias calcSM24In(3) = calcP24    : Units calcP24 = unitless
+Alias calcSM50In(1) = calcVWC50  : Units calcVWC50 = m^3/m^3
+Alias calcSM50In(2) = calcEC50   : Units calcEC50 = dS/m
+Alias calcSM50In(3) = calcP50    : Units calcP50 = unitless
+
+'Imperial units
+Public TAir_F                    : Units TAir_F = Deg F
+Public Rain_in                   : Units Rain_in = inch
+Public WS_mph                    : Units WS_mph = miles/hr
+Public TSoil_F                   : Units TSoil_F = Deg F
+Public T12_F                     : Units T12_F = Deg F
+Public T24_F                     : Units T24_F = Deg F
+Public T50_F                     : Units T50_F = Deg F
+
+'Dim Variables
+'Dim rTime(9)
+'Alias rTime(5) = minute
+'Dim nanCountTot As Long
+'Dim nanCountLast As Long
+Dim nanCount(9) As Long
+Dim outOfRange(4) As Boolean
+Alias nanCount(1) = nanTAir_C
+Alias nanCount(2) = nanRH
+Alias nanCount(3) = nanSlrW
+Alias nanCount(4) = nanWindDir
+Alias nanCount(5) = nanTSoil_C
+Alias nanCount(6) = nanT06_C
+Alias nanCount(7) = nanT12_C
+Alias nanCount(8) = nanT24_C
+Alias nanCount(9) = nanT50_C
+Alias outOfRange(1) = outOfRange06
+Alias outOfRange(2) = outOfRange12
+Alias outOfRange(3) = outOfRange24
+Alias outOfRange(4) = outOfRange50
+
+'Data Tables
+DataTable(MinSI,True,-1)
+  DataInterval(0,1,Min,2)
+  Average(1,TAir_C,FP2,TAir_F = NAN)
+  Average (1,RH,FP2,False)
+  WindVector(1,WS_mph,WindDir,FP2,WindDir=NAN,0,0,1)
+  FieldNames("WS_mph_S_WVT,WindDir_D1_WVT")
+  Average(1,TSoil_C,FP2,TSoil_F=NAN)
+  Average(1,calcVWC12,FP2,False)
+  Average(1,calcVWC24,FP2,False)
+  Average(1,calcVWC50,FP2,False)
+  Average(1,T12_C,FP2,T12_F=NAN)
+  Average(1,T24_C,FP2,T24_F=NAN)
+  Average(1,T50_C,FP2,T50_F=NAN)
+  Average (1,SlrW,FP2,SlrW=NAN)
+  'Totalize(1,SlrkJ,FP2,SlrkJ=NAN)
+  Totalize(1,Rain_in,FP2,False)
+  Maximum(1,WS_mph,FP2,False,False)
+EndTable
+
+DataTable(HrlySI,True,-1)
+  DataInterval(0,1,Hr,2)
+  Minimum (1,BattV,FP2,False,False)
+  Sample (1,EncRH,FP2)
+  Maximum (1,TAir_C,FP2,False,False)
+  Minimum (1,TAir_C,FP2,False,False)
+  Average(1,SlrW,FP2,SlrW=NAN)
+  'Totalize(1,SlrkJ,FP2,SlrkJ=NAN)
+  Totalize(1,Rain_in,FP2,False)
+  WindVector(1,WS_mph,WindDir,FP2,WindDir=NAN,0,0,1)
+  FieldNames("WS_mph_S_WVT,WindDir_D1_WVT")
+  Maximum(1,WS_mph,FP2,False,True)
+  ETsz(TAir_C,RH,WS_mps,SlrMJ,93.58482,42.10671,301.991,3,1,FP2,TAir_C=NAN OR RH=NAN OR SlrMJ=NAN)
+  FieldNames("ETAlfalfa,SolarRadCalc")
+EndTable
+
+DataTable(DailySI,True,-1)
+  DataInterval(0,1,Day,2)
+  Maximum (1,TAir_C,FP2,False,False)
+  Minimum (1,TAir_C,FP2,False,False)
+  Average (1,SlrW,FP2,SlrW=NAN)
+  'Totalize(1,SlrMJ,FP2,TAir_C=NAN)
+  Totalize(1,Rain_in,FP2,False)
+  Maximum(1,WS_mph,FP2,False,True)
+EndTable
+
+'Subroutine to measure and post process data from CS655 soil moisture probes
+Sub GetVWC(raw(6),calc(3),outOfRange,nanC,t_F,KAm,KAo,LAm,LAo,SDIAddr)
+  Alias raw(1)=VWC: Alias raw(2)=EC: Alias raw(3)=T: Alias raw(4)=P: Alias raw(5)=PA: Alias raw(6)=VR
+  Alias calc(1)=cVWC: Alias calc(2)=cEC: Alias calc(3)=cP
+  Move(raw,6,NAN,1) 'Move NANs into raw measurements to mark bad comms or returned vals
+  If SDIAddr=0 OR SDIAddr=3 Then SDI12Recorder(raw,1,SDIAddr,"M3!",1,0)
+  If SDIAddr=1 Then SDI12Recorder(raw,3,SDIAddr,"M3!",1,0)
+  If SDIAddr=2 Then SDI12Recorder(raw,5,SDIAddr,"M3!",1,0)
+  If T = NAN Then nanC += 1 'Track NANs in temperature data
+  t_F = T * 1.8 + 32 'Convert soil temperature to deg F
+  cEC = EC
+  cP = P
+  outOfRange = False
+  If P >= 9999 OR P = NAN Then
+    outOfRange = True
+    cEC = EC / (1 + 0.02 * (T - 25))'EC temperature correction
+    cP = C0*cEC*cEC*cEC*PA*PA+C1*cEC*cEC*PA*PA+C2*cEC*PA*PA+C3*PA*PA+C4*cEC*cEC*cEC*PA
+    cP = (cP+C5*cEC*cEC*PA+C6*cEC*PA+C7*PA+C8*cEC*cEC*cEC+C9*cEC*cEC+C10*cEC+C11)*KAm+KAo
+  EndIf
+  cP = (cP^0.5*LAm+LAo)*(cP^0.5*LAm+LAo) 'Correct permittivity with soil specific multiplier and offset
+  cVWC = -0.053+0.0292*cP-0.00055*cP*cP+0.0000043*cP*cP*cP 'Convert permittivity to VWC w/Topp
+EndSub
+
+'Main Program
+BeginProg
+  Scan(15,Sec,0,0)
+    
+    'Datalogger Battery Voltage measurement 'BattV'
+    Battery(BattV)
+
+    'Wiring Panel Temperature measurement 'PTemp_C'
+    PanelTemp(PTemp_C,250)
+
+    'CS215 Temperature & Relative Humidity Sensor measurements 'TAir_C' and 'RH'
+    Move(TRHData,2,NAN,1)
+    SDI12Recorder(TRHData,7,0,"M!",1,0)
+    TAir_F = TAir_C * 1.8 + 32
+    If RH > 100 AND RH < 106 Then RH = 100
+    If TAir_C = NAN Then nanTAir_C += 1
+    If RH = NAN Then nanRH += 1
+
+    'CS300 Pyranometer measurements 'SlrMJ, SlrKJ, and SlrW'
+    VoltSe(SlrW,1,mV250C,1,False,0,_60Hz,1,0)
+    If SlrW < 0 Then SlrW = 0
+    SlrMJ = SlrW * 0.000075
+    SlrkJ = SlrW * 0.075
+    'Following needed to convert variable to average per manual'
+    SlrW = SlrW * 5
+    If SlrW = NAN Then nanSlrW += 1
+
+    'TE525/TE525WS Rain Gauge measurement 'Rain_in'
+    PulseCount(Rain_in,1,1,2,0,0.01,0)
+    Rain_mm = Rain_in * 25.4
+
+    '03002 Wind Speed & Direction Sensor measurements 'WS_mph' and 'WindDir'
+    PulseCount(WS_mph,1,2,1,1,1.677,0.4)
+    If WS_mph < 0.41 Then WS_mph = 0
+    WS_mps = WS_mph * 0.44704
+    BrHalf(WindDir,1,mV2500C,2,1,1,2500,True,0,_60Hz,352,0)
+    If WindDir >= 360 Then WindDir = 0
+    If WindDir = NAN Then nanWindDir += 1
+
+    '107 Temperature Probe measurement 'TSoil_F'
+    Therm107(TSoil_C,1,6,1,0,_60Hz,1,0)
+    TSoil_F = TSoil_C * 1.8 + 32
+    If TSoil_C = NAN Then nanTSoil_C += 1
+
+    'CS210 Enclosure Humidity measurement 'EncRH'
+    VoltSe(EncRH,1,mV2500,5,False,0,250,0.1,0)
+
+    'CS655 Water Content Reflectometer measurements
+    GetVWC(SoilM12In,calcSM12In,outOfRange12,nanT12_C,T12_F,KA_MULT_12,KA_OFFSET_12,LA_12_MULT,LA_12_OFFSET,0)
+    GetVWC(SoilM24In,calcSM24In,outOfRange24,nanT24_C,T24_F,KA_MULT_24,KA_OFFSET_24,LA_24_MULT,LA_24_OFFSET,1)
+    GetVWC(SoilM50In,calcSM50In,outOfRange50,nanT50_C,T50_F,KA_MULT_50,KA_OFFSET_50,LA_50_MULT,LA_50_OFFSET,2)
+
+    'Call Data Tables
+    CallTable MinSI
+    CallTable HrlySI
+    If IfTime(0,1,Hr) Then DailyET += HrlySI.ETAlfalfa(1,1) 'Update Daily ET running total
+    CallTable DailySI
+    If IfTime(0,1,Day) Then DailyET = 0
+
+  NextScan
+EndProg
